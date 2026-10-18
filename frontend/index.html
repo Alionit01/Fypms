@@ -11,10 +11,31 @@
     />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- The font stylesheet is loaded asynchronously so it cannot block
+         first paint. From some networks fonts.googleapis.com took
+         1.7-4.8s (measured), and a plain <link rel="stylesheet"> in
+         <head> is render-blocking, so cold visitors waited that long to
+         see anything. media="print" keeps it out of the render path;
+         onload swaps it in once ready. display=swap already renders
+         text in the fallback font immediately, so this only removes the
+         wait for the CSS itself. -->
     <link
+      rel="preload"
+      as="style"
       href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..700;1,9..144,400..700&family=Inter:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
     />
+    <link
+      rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
+      href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..700;1,9..144,400..700&family=Inter:wght@400;500;600;700&display=swap"
+    />
+    <noscript>
+      <link
+        rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..700;1,9..144,400..700&family=Inter:wght@400;500;600;700&display=swap"
+      />
+    </noscript>
     <title>FYP Finder</title>
   </head>
   <body>
