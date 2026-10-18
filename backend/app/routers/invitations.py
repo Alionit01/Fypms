@@ -12,6 +12,9 @@ from ..schemas import MAX_TEAM_MEMBERS
 from ..services.directory import _directory_entry
 from ..services.invitations import (
     _actionable_invitations,
+    _batch_inviters,
+    _batch_member_counts,
+    _batch_students,
     _invitation_expired,
     _member_count,
     _my_invitation_entry,
@@ -180,10 +183,20 @@ def list_team_invitations(
             ).all()
         } if invitations else set()
 
-        entries = _ordered_by_sent_at([
-            _sent_invitation_entry(db, invitation)
-            for invitation in invitations
+        manageable = [
+            invitation for invitation in invitations
             if invitation.student_id not in in_any_team_ids
+        ]
+        # One query for every invitee instead of one per row (N+1): the
+        # owner's list used to issue a lookup per invitation.
+        students = _batch_students(
+            db, [invitation.student_id for invitation in manageable]
+        )
+        entries = _ordered_by_sent_at([
+            _sent_invitation_entry(
+                db, invitation, students.get(invitation.student_id)
+            )
+            for invitation in manageable
         ])
         member_count = _member_count(db, team_id)
         open_count = sum(1 for entry in entries if entry["status"] == "pending")
@@ -440,8 +453,8 @@ def get_my_invitations(current_student: models.Student = Depends(get_current_stu
             models.Team, models.Team.id == models.TeamInvitation.team_id
         ).filter(models.TeamInvitation.student_id == current_student.id).all()
 
-        entries = []
         now = utc_now()
+        kept = []
         for invitation, team in rows:
             # An invitation from a previous owner no longer speaks for
             # the team, and an expired one is no longer a choice — both
@@ -451,7 +464,27 @@ def get_my_invitations(current_student: models.Student = Depends(get_current_stu
                 continue
             if _invitation_expired(invitation, now):
                 continue
-            entries.append(_my_invitation_entry(db, invitation, team))
+            kept.append((invitation, team))
+
+        if not kept:
+            return []
+
+        # Fetch the inviter and per-team member count for the whole batch
+        # up front. Doing it per row (the previous behaviour) issued 2
+        # extra queries per invitation; against the production database
+        # each round trip costs hundreds of milliseconds, so a handful of
+        # invitations used to take seconds. This is O(1) queries now.
+        inviters = _batch_inviters(db, [inv for inv, _ in kept])
+        counts = _batch_member_counts(db, [team.id for _, team in kept])
+
+        entries = [
+            _my_invitation_entry(
+                db, invitation, team,
+                inviter=inviters.get(invitation.invited_by),
+                member_count=counts.get(team.id, 0),
+            )
+            for invitation, team in kept
+        ]
 
         return _ordered_by_sent_at(entries)
     finally:
