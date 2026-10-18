@@ -16,6 +16,8 @@ if both sides can see and undo what the other side has done, so:
 
 from datetime import timezone
 
+from sqlalchemy import func
+
 from .. import models
 from ..models import utc_now
 
@@ -110,12 +112,78 @@ def _member_count(db, team_id) -> int:
     ).count()
 
 
-def _my_invitation_entry(db, invitation, team) -> dict:
-    """An inbox entry: everything the invitee needs to decide."""
-    inviter = db.query(models.Student).filter(
-        models.Student.id == invitation.invited_by
-    ).first()
-    member_count = _member_count(db, team.id)
+# Distinguishes "the caller did not supply this value" from a legitimate
+# None (e.g. a deleted inviter), so a batched caller can pass prefetched
+# data without the helper silently re-querying for rows it already has.
+_UNSET = object()
+
+
+def _batch_inviters(db, invitations):
+    """Every distinct inviter for ``invitations``, fetched in one query.
+
+    Returns a map of student id -> Student. Replaces the per-row inviter
+    lookup that used to run inside ``_my_invitation_entry`` (N+1).
+    """
+    ids = {invitation.invited_by for invitation in invitations}
+    if not ids:
+        return {}
+    return {
+        student.id: student
+        for student in db.query(models.Student).filter(
+            models.Student.id.in_(ids)
+        ).all()
+    }
+
+
+def _batch_member_counts(db, team_ids):
+    """Member counts for several teams in one grouped query.
+
+    Returns a map of team id -> count (teams with no members are absent,
+    so callers should treat a missing key as 0). Replaces the per-team
+    ``_member_count`` call that used to run inside ``_my_invitation_entry``
+    (N+1).
+    """
+    team_ids = set(team_ids)
+    if not team_ids:
+        return {}
+    rows = db.query(
+        models.TeamMember.team_id,
+        func.count(models.TeamMember.id),
+    ).filter(
+        models.TeamMember.team_id.in_(team_ids)
+    ).group_by(models.TeamMember.team_id).all()
+    return dict(rows)
+
+
+def _batch_students(db, student_ids):
+    """A map of student id -> Student for ``student_ids``, one query."""
+    ids = set(student_ids)
+    if not ids:
+        return {}
+    return {
+        student.id: student
+        for student in db.query(models.Student).filter(
+            models.Student.id.in_(ids)
+        ).all()
+    }
+
+
+def _my_invitation_entry(db, invitation, team,
+                         inviter=_UNSET, member_count=_UNSET) -> dict:
+    """An inbox entry: everything the invitee needs to decide.
+
+    ``inviter`` and ``member_count`` may be supplied by a caller that has
+    already fetched them for a whole batch. That is what keeps a long
+    invitation list from issuing one query per row (N+1) — each round
+    trip to the database is expensive in production, so the helpers
+    accept prefetched values and only query when they are omitted.
+    """
+    if inviter is _UNSET:
+        inviter = db.query(models.Student).filter(
+            models.Student.id == invitation.invited_by
+        ).first()
+    if member_count is _UNSET:
+        member_count = _member_count(db, team.id)
 
     return {
         "id": invitation.id,
@@ -140,9 +208,14 @@ def _my_invitation_entry(db, invitation, team) -> dict:
     }
 
 
-def _sent_invitation_entry(db, invitation, student=None) -> dict:
-    """A sent-invitation row for the owner's management list."""
-    if student is None:
+def _sent_invitation_entry(db, invitation, student=_UNSET) -> dict:
+    """A sent-invitation row for the owner's management list.
+
+    ``student`` may be supplied by a caller that already fetched it for a
+    batch, avoiding the per-row query that would otherwise dominate the
+    owner's invitation list.
+    """
+    if student is _UNSET:
         student = db.query(models.Student).filter(
             models.Student.id == invitation.student_id
         ).first()
