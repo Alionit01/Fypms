@@ -118,6 +118,14 @@ def _unique_index_exists(engine_, table: str, name: str) -> bool:
     )
 
 
+def _index_exists(engine_, table: str, name: str) -> bool:
+    """True when any index (unique or not) named ``name`` exists."""
+    return any(
+        ix["name"] == name
+        for ix in _inspector(engine_).get_indexes(table)
+    )
+
+
 def _unique_constraint_exists(engine_, table: str, name: str) -> bool:
     return any(
         uc["name"] == name
@@ -239,6 +247,41 @@ def _migration_0003_team_invitation_timestamps(engine_) -> None:
     )
 
 
+def _migration_0004_team_invitation_indexes(engine_) -> None:
+    """Index the invitation lookups the hot path runs on every request.
+
+    ``GET /my-invitations`` — polled by the navbar on every route change —
+    filters ``team_invitations`` by ``student_id`` alone. The existing
+    composite unique index ``unique_team_invitee`` is on
+    (team_id, student_id), whose leading column is team_id, so it cannot
+    serve a student_id-only predicate. Measured with EXPLAIN against a
+    62k-row stand-in:
+
+        Seq Scan          cost=1351   (no index)
+        Bitmap Index Scan cost=23     (with ix_team_invitations_student_id)
+
+    ``_purge_expired_invitations`` filters on ``expires_at <= now()`` and
+    likewise had no supporting index.
+
+    Both are created only if absent, so this is idempotent and safe to
+    replay (the test suite drops and recreates tables between cases).
+    This addresses scan cost only; the dominant production cost is the
+    database round-trip itself, which the N+1 query reduction handles.
+    """
+    if not _table_exists(engine_, "team_invitations"):
+        return
+    for name, column in (
+        ("ix_team_invitations_student_id", "student_id"),
+        ("ix_team_invitations_expires_at", "expires_at"),
+    ):
+        if _index_exists(engine_, "team_invitations", name):
+            continue
+        with engine_.begin() as conn:
+            conn.execute(text(
+                f"CREATE INDEX {name} ON team_invitations ({column})"
+            ))
+
+
 MIGRATIONS = [
     ("0001_students_baseline",
      "Add students columns introduced after first deploy (no data rewrite)",
@@ -249,6 +292,9 @@ MIGRATIONS = [
     ("0003_team_invitation_timestamps",
      "INV-01: record when an invitation was sent and when it expires",
      _migration_0003_team_invitation_timestamps),
+    ("0004_team_invitation_indexes",
+     "Index team_invitations.student_id and expires_at for the hot path",
+     _migration_0004_team_invitation_indexes),
 ]
 
 

@@ -137,7 +137,8 @@ class TeamInvitation(Base):
         Integer, ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
     )
     student_id = Column(
-        Integer, ForeignKey("students.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey("students.id", ondelete="CASCADE"),
+        nullable=False, index=True,
     )
     invited_by = Column(
         Integer, ForeignKey("students.id"), nullable=False
@@ -155,6 +156,9 @@ class TeamInvitation(Base):
         DateTime(timezone=True),
         nullable=False,
         default=lambda: utc_now() + INVITATION_TTL,
+        # Indexed because _purge_expired_invitations filters on
+        # expires_at <= now() — without this it is a full table scan.
+        index=True,
     )
 
     __table_args__ = (
