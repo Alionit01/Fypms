@@ -1,10 +1,8 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   BriefcaseBusiness,
   Camera,
-  CheckCircle2,
-  Circle,
   Code2,
   Eye,
   MessageCircle,
@@ -15,79 +13,35 @@ import {
 import API_URL from "../api";
 import { extractErrorMessage } from "../api/errors";
 import { useAuth } from "../context/AuthContext";
-import { isProfileComplete } from "../profile";
+import {
+  isProfileComplete,
+  parseSkillChips,
+  skillChipsToString,
+  toFormState,
+} from "../profile";
+import { applyPictureSelection } from "../lib/picture";
 import Alert from "../components/Alert";
 import Avatar from "../components/Avatar";
+import ChipInput from "../components/ChipInput";
 import InvitationsSection from "../components/InvitationsSection";
+import ProfileSetup from "../components/ProfileSetup";
 import Tags from "../components/Tags";
-
-/* Avatar limits. Mirrors backend/app/schemas.py: the same raster
-   allow-list (no SVG — it is markup, not an image) and the same 1 MB
-   cap. Enforced here for instant feedback and again on the server. */
-const ACCEPTED_PICTURE_TYPES = [
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp",
-];
-const MAX_PICTURE_BYTES = 1024 * 1024;
-
-/* Checklist shown while a profile is still incomplete. Status is
-   conveyed by icon shape + text, not colour alone. */
-function SetupBanner({ profile }) {
-  const items = [
-    {
-      label: "Skills",
-      done: Boolean(profile.skills && profile.skills.trim()),
-    },
-    { label: "FYP status", done: Boolean(profile.fyp_status) },
-  ];
-
-  return (
-    <section className="mb-6 rounded-2xl border border-sun-300/60 bg-warning-50 p-5 sm:p-6">
-      <h2 className="display text-xl text-warning-700">
-        Complete your profile
-      </h2>
-
-      <p className="mt-1.5 text-sm text-warning-700/90">
-        Other students need these details to find and trust you. All
-        items are required before you can create or join teams.
-      </p>
-
-      <ul className="mt-4 space-y-2 text-sm">
-        {items.map((item) => (
-          <li
-            key={item.label}
-            className={`flex items-center gap-2 font-medium ${
-              item.done ? "text-success-700" : "text-warning-700"
-            }`}
-          >
-            {item.done ? (
-              <CheckCircle2 size={17} aria-hidden="true" />
-            ) : (
-              <Circle size={17} aria-hidden="true" />
-            )}
-            <span>
-              {item.label}
-              <span className="sr-only">
-                {item.done ? " added" : " still missing"}
-              </span>
-            </span>
-          </li>
-        ))}
-      </ul>
-
-      <p className="mt-4 text-xs text-warning-700/80">
-        Profile photo are optional but make sure to add linkdin/github links to your profile. It will help other students to find you and see the compatibility.
-      </p>
-    </section>
-  );
-}
 
 function MyProfile() {
   const [profile, setProfile] = useState(null);
   const [form, setForm] = useState(null);
+  // True once the wizard's save succeeds: keep showing its done screen
+  // even though the profile (and its completion flag) is now complete,
+  // so "Start exploring" still gets its send-off moment.
+  const [setupDone, setSetupDone] = useState(false);
   const { setProfileComplete } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  // Where the student was heading when the setup gate redirected them
+  // here (ProtectedRoute stores it); the wizard returns them after the
+  // first save. Falls back to the home page.
+  const returnTo = location.state?.from?.pathname || "/";
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -119,23 +73,7 @@ function MyProfile() {
       })
       .then((data) => {
         setProfile(data);
-
-        setForm({
-          name: data.name || "",
-          program: data.program || "",
-          profile_picture: data.profile_picture || "",
-          bio: data.bio || "",
-          github: data.github || "",
-          linkedin: data.linkedin || "",
-          whatsapp: data.whatsapp || "",
-          skills: data.skills || "",
-          interests: data.interests || "",
-          fyp_status: data.fyp_status || "",
-        });
-
-        // A profile still being set up starts in edit mode.
-        if (!isProfileComplete(data)) setEditing(true);
-
+        setForm(toFormState(data));
         setLoading(false);
       })
       .catch((err) => {
@@ -152,36 +90,9 @@ function MyProfile() {
   };
 
   const handlePictureUpload = (e) => {
-    const file = e.target.files?.[0];
-
-    if (!file) return;
-
-    // Keep these in step with the server-side rules in
-    // backend/app/schemas.py (_validate_picture): the same raster
-    // allow-list and the same 1 MB limit. Checking here turns a
-    // server-side 422 into an immediate, readable message.
-    if (!ACCEPTED_PICTURE_TYPES.includes(file.type)) {
-      setError("Please choose a JPEG, PNG, GIF or WebP image.");
-      return;
-    }
-
-    if (file.size > MAX_PICTURE_BYTES) {
-      setError("Image is too large. Please use a file under 1 MB.");
-      return;
-    }
-
-    setError("");
-
-    const reader = new FileReader();
-
-    reader.onload = () => {
-      setForm((current) => ({
-        ...current,
-        profile_picture: reader.result,
-      }));
-    };
-
-    reader.readAsDataURL(file);
+    // Type/size rules live in lib/picture.js (mirroring the backend)
+    // and are shared with the setup wizard.
+    applyPictureSelection(e.target.files?.[0], setForm, setError);
   };
 
   const handleSubmit = async (e) => {
@@ -190,18 +101,6 @@ function MyProfile() {
     setSaving(true);
     setMessage("");
     setError("");
-
-    // Setup mode only: do not let an incomplete save succeed.
-    if (!isProfileComplete(profile)) {
-      const missing = [];
-      if (!form.skills || !form.skills.trim()) missing.push("your skills");
-      if (!form.fyp_status) missing.push("your FYP status");
-      if (missing.length > 0) {
-        setError(`Please add ${missing.join(", ")} before saving.`);
-        setSaving(false);
-        return;
-      }
-    }
 
     try {
       const response = await fetch(
@@ -232,19 +131,7 @@ function MyProfile() {
       const updated = data.profile;
 
       setProfile(updated);
-
-      setForm({
-        name: updated.name || "",
-        program: updated.program || "",
-        profile_picture: updated.profile_picture || "",
-        bio: updated.bio || "",
-        github: updated.github || "",
-        linkedin: updated.linkedin || "",
-        whatsapp: updated.whatsapp || "",
-        skills: updated.skills || "",
-        interests: updated.interests || "",
-        fyp_status: updated.fyp_status || "",
-      });
+      setForm(toFormState(updated));
 
       setMessage("Profile updated successfully.");
       setEditing(false);
@@ -293,6 +180,24 @@ function MyProfile() {
     );
   }
 
+  // An incomplete profile gets the guided setup instead of the form;
+  // once it saves, the wizard sends them where they were headed.
+  if (!isProfileComplete(profile) || setupDone) {
+    return (
+      <ProfileSetup
+        profile={profile}
+        token={token}
+        onUpdated={(updated) => {
+          setProfile(updated);
+          setForm(toFormState(updated));
+          setProfileComplete(true);
+          setSetupDone(true);
+        }}
+        onDone={() => navigate(returnTo, { replace: true })}
+      />
+    );
+  }
+
   if (!editing) {
     const skills = profile.skills
       ? profile.skills
@@ -327,8 +232,6 @@ function MyProfile() {
             This is how other students see you.
           </p>
         </div>
-
-        {!isProfileComplete(profile) && <SetupBanner profile={profile} />}
 
         {/* Pending invitations first — they're the only time-sensitive
             action on this page, and the navbar bell links here. Hidden
@@ -501,8 +404,6 @@ function MyProfile() {
           you.
         </p>
       </div>
-
-      {!isProfileComplete(profile) && <SetupBanner profile={profile} />}
 
       <form onSubmit={handleSubmit} className="card p-5 sm:p-8">
         {/* Basic information */}
@@ -691,14 +592,14 @@ function MyProfile() {
                   Skills
                 </label>
 
-                <input
+                <ChipInput
                   id="skills"
-                  type="text"
-                  name="skills"
-                  value={form.skills}
-                  onChange={handleChange}
-                  placeholder="e.g. Python, React, SQL, UI/UX"
-                  className="input-field"
+                  chips={parseSkillChips(form.skills)}
+                  onChange={(chips) =>
+                    setForm({ ...form, skills: skillChipsToString(chips) })
+                  }
+                  inputLabel="Your skills"
+                  placeholder="e.g. React, Python, UI/UX"
                 />
               </div>
 
@@ -710,14 +611,14 @@ function MyProfile() {
                   Interests
                 </label>
 
-                <input
+                <ChipInput
                   id="interests"
-                  type="text"
-                  name="interests"
-                  value={form.interests}
-                  onChange={handleChange}
+                  chips={parseSkillChips(form.interests)}
+                  onChange={(chips) =>
+                    setForm({ ...form, interests: skillChipsToString(chips) })
+                  }
+                  inputLabel="Your interests"
                   placeholder="e.g. AI, Web Development, Cybersecurity"
-                  className="input-field"
                 />
               </div>
             </div>
@@ -814,18 +715,7 @@ function MyProfile() {
           <button
             type="button"
             onClick={() => {
-              setForm({
-                name: profile.name || "",
-                program: profile.program || "",
-                profile_picture: profile.profile_picture || "",
-                bio: profile.bio || "",
-                github: profile.github || "",
-                linkedin: profile.linkedin || "",
-                whatsapp: profile.whatsapp || "",
-                skills: profile.skills || "",
-                interests: profile.interests || "",
-                fyp_status: profile.fyp_status || "",
-              });
+              setForm(toFormState(profile));
               setError("");
               setEditing(false);
             }}
